@@ -5,7 +5,7 @@
 //! [`Approver`]. Disabling never does: reducing access is always safe.
 
 use crate::approval::Approver;
-use crate::config::{validate_route, AuthInjection, RouteConfig, DEFAULT_GROUP};
+use crate::config::{same_token_destination, validate_route, AuthInjection, RouteConfig, DEFAULT_GROUP};
 use crate::state::{Activation, AppState};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -17,7 +17,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "web/dist/client"]
@@ -106,11 +106,41 @@ async fn require_approval(state: &AdminState, reason: String) -> Result<(), Resp
     outcome.map_err(|e| error(StatusCode::FORBIDDEN, format!("Non approuvé : {e}")))
 }
 
-fn host_of(upstream: &str) -> String {
+/// `scheme://host[:port]` of a service URL, for approval dialogs: the scheme
+/// and port matter as much as the host.
+fn origin_of(upstream: &str) -> String {
     reqwest::Url::parse(upstream)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-        .unwrap_or_else(|| upstream.to_string())
+        .map(|u| u.origin().ascii_serialization())
+        .unwrap_or_else(|_| upstream.to_string())
+}
+
+fn auth_label(auth: &AuthInjection) -> String {
+    match auth {
+        AuthInjection::Bearer => "en-tête Authorization".to_string(),
+        AuthInjection::Header { name } => format!("en-tête {name}"),
+        AuthInjection::Query { param } => format!("paramètre d’URL {param}"),
+    }
+}
+
+/// Describes an edit for the approval dialog, each change that matters for
+/// the token shown as before → after.
+fn change_reason(previous: &RouteConfig, route: &RouteConfig) -> String {
+    let mut changes = Vec::new();
+    if previous.id() != route.id() {
+        changes.push(format!("renommée « {} »", route.id()));
+    }
+    if previous.upstream == route.upstream {
+        changes.push(format!("vers {}", route.upstream));
+    } else {
+        changes.push(format!("{} → {}", previous.upstream, route.upstream));
+    }
+    if previous.auth != route.auth {
+        changes.push(format!("token par {} → par {}", auth_label(&previous.auth), auth_label(&route.auth)));
+    }
+    if previous.token != route.token {
+        changes.push("nouveau token".to_string());
+    }
+    format!("modifier la route « {} » : {}", previous.id(), changes.join(" ; "))
 }
 
 #[derive(Serialize)]
@@ -130,7 +160,7 @@ fn route_view(app: &AppState, route: RouteConfig) -> RouteView {
         Activation::Disabled => (false, None),
         Activation::Enabled { until } => (
             true,
-            until.map(|u| u.saturating_duration_since(Instant::now()).as_secs()),
+            until.map(|u| u.duration_since(SystemTime::now()).unwrap_or_default().as_secs()),
         ),
     };
     RouteView {
@@ -242,22 +272,30 @@ async fn update_route(
         Ok(route) => route,
         Err(response) => return response,
     };
-    let previous_id = current.id();
-    let route = input.into_route(Some(current.token));
-    save_route(&state, route, Some(previous_id)).await
+    let route = input.into_route(Some(current.token.clone()));
+    save_route(&state, route, Some(current)).await
 }
 
-async fn save_route(state: &AdminState, route: RouteConfig, previous_id: Option<String>) -> Response {
+/// `previous` is the route being replaced, if any.
+async fn save_route(state: &AdminState, route: RouteConfig, previous: Option<RouteConfig>) -> Response {
+    let previous_id = previous.as_ref().map(RouteConfig::id);
     if let Err(e) = validate_route(&route, &state.app.routes(), previous_id.as_deref()) {
         return error(StatusCode::BAD_REQUEST, e);
     }
+    // Keeping the token is only allowed while it goes to the same place.
+    if let Some(previous) = &previous
+        && route.token == previous.token
+        && !same_token_destination(previous, &route)
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "Colle le token à nouveau : l’URL du service (schéma, hôte ou port) ou la transmission du token a changé.",
+        );
+    }
     let id = route.id();
-    let reason = match &previous_id {
-        None => format!("ajouter la route « {id} » vers {}", host_of(&route.upstream)),
-        Some(previous) if *previous != id => {
-            format!("modifier la route « {previous} », renommée « {id} » ({})", host_of(&route.upstream))
-        }
-        Some(_) => format!("modifier la route « {id} » ({})", host_of(&route.upstream)),
+    let reason = match &previous {
+        None => format!("ajouter la route « {id} » vers {} (token par {})", route.upstream, auth_label(&route.auth)),
+        Some(previous) => change_reason(previous, &route),
     };
     if let Err(response) = require_approval(state, reason).await {
         return response;
@@ -277,7 +315,7 @@ async fn delete_route(State(state): State<Arc<AdminState>>, Path(path): Path<(St
         Err(response) => return response,
     };
     let id = route.id();
-    let reason = format!("supprimer la route « {id} » ({})", host_of(&route.upstream));
+    let reason = format!("supprimer la route « {id} » ({})", origin_of(&route.upstream));
     if let Err(response) = require_approval(&state, reason).await {
         return response;
     }
@@ -310,7 +348,7 @@ async fn enable_route(
         Some(m) => format!("pendant {m} min"),
         None => "jusqu’à désactivation".to_string(),
     };
-    let reason = format!("activer la route « {id} » ({}) {duration}", host_of(&route.upstream));
+    let reason = format!("activer la route « {id} » ({}) {duration}", origin_of(&route.upstream));
     if let Err(response) = require_approval(&state, reason).await {
         return response;
     }

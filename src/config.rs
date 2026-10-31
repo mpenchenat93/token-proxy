@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::net::IpAddr;
 
 /// How the credential is added to the upstream request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +44,33 @@ impl RouteConfig {
     }
 }
 
+/// Whether `a` and `b` send the token to the same place, the same way: same
+/// scheme, host and port, same injection. Changing any of them requires the
+/// token again, so that whoever edits a route without knowing its token (an
+/// agent calling the admin API) cannot send it elsewhere.
+pub fn same_token_destination(a: &RouteConfig, b: &RouteConfig) -> bool {
+    let origin = |r: &RouteConfig| reqwest::Url::parse(&r.upstream).ok().map(|u| u.origin());
+    a.auth == b.auth && origin(a).is_some_and(|o| Some(o) == origin(b))
+}
+
+/// Loopback, private network or link-local hosts, where plain http does not
+/// carry the token over the internet. Names are only trusted when they cannot
+/// be public (`localhost`, mDNS `.local`, `.home.arpa`).
+fn is_local_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else { return false };
+    match host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            // 100.64.0.0/10: carrier-grade NAT, used by Tailscale.
+            let shared = ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64;
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || shared
+        }
+        Ok(IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+        Err(_) => {
+            host == "localhost" || [".localhost", ".local", ".home.arpa"].iter().any(|s| host.ends_with(s))
+        }
+    }
+}
+
 fn is_slug(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
@@ -76,6 +104,12 @@ pub fn validate_route(route: &RouteConfig, existing: &[RouteConfig], editing: Op
     let url = reqwest::Url::parse(&route.upstream).map_err(|e| format!("URL cible invalide : {e}"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("L’URL cible doit être de la forme http(s)://hôte[…].".into());
+    }
+    if url.scheme() == "http" && !is_local_host(&url) {
+        return Err(
+            "http:// n’est accepté que vers une adresse locale (localhost, réseau privé) : ailleurs, le token passerait en clair. Utilise https://."
+                .into(),
+        );
     }
     if url.query().is_some() || !url.username().is_empty() || url.password().is_some() {
         return Err("L’URL cible ne doit contenir ni paramètres ni identifiants.".into());

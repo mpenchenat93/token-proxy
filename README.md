@@ -35,6 +35,8 @@ Token Proxy keeps the tokens in the macOS Keychain and adds them to requests its
 ## Security model
 
 - **Touch ID for anything that grants access.** Adding, editing, deleting or enabling a route opens the macOS authentication dialog (Touch ID or the account password). The admin API is reachable by any local program, the agent included, but no program can complete that dialog. An agent may *ask* for a route to be enabled: approve only what you triggered yourself. Disabling never needs Touch ID.
+- **Moving a token needs the token.** Editing a route keeps its token only while the token goes to the same place: changing the service's scheme, host or port, or how the token is sent (header, query parameter), is refused unless the token is pasted again. An agent that calls the admin API never has the token, so it cannot point a route elsewhere, even if you approve the dialog by mistake. The dialog shows each change as before → after.
+- **https outside your network.** `http://` service URLs are refused except for local addresses (`localhost`, private and link-local IPs, `.local`), so a token never crosses the internet in clear.
 - **Tokens stay in the Keychain.** All routes, tokens included, are stored in one Keychain item (`token-proxy` / `vault`). No file holds a secret, the APIs never return a token, and macOS asks you before any other program reads or changes that item.
 - **Routes start disabled.** You enable a route for 15 minutes, 1 hour, 4 hours or until you disable it. Activations are stored in the Keychain too, so they survive a restart and no program can enable a route by editing a file. Editing a route disables it.
 - **The token only goes to its service.** Credentials sent by the client (`Authorization`, `Cookie`, `x-api-key`) are dropped, redirects are not followed, and response headers that contain the token are removed.
@@ -47,6 +49,7 @@ Know them before you rely on it:
 
 - **macOS only.** It depends on the Keychain, LocalAuthentication (Touch ID) and launchd.
 - **The token's permissions are the only limit.** The proxy does not filter methods or paths: an enabled route lets the agent do everything the token allows. Use the narrowest token the service offers (read-only, one project), create a second route with another token for writes, and enable it only when needed.
+- **A path in the service URL is not a restriction.** A route to `https://gitlab.com/api/v4/projects/42` stops `..` from climbing above that path, but the service may decode paths its own way (`%2F`…): the token can still reach everything it is allowed to. Restrict the token itself.
 - **It protects the token, not access.** While a route is enabled, any program running as your user can call it: there is no client authentication on port 8787. Short activations limit that window.
 - **Responses reach the agent.** Whatever the service answers goes to the agent and its provider. Only response headers are checked for the token, not bodies.
 - **Query-parameter tokens can end up in upstream logs**, as with any URL token. Prefer header-based auth when the service supports it.

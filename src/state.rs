@@ -8,7 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const AUDIT_CAPACITY: usize = 500;
 
@@ -25,8 +25,10 @@ pub enum ServerStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activation {
     Disabled,
-    /// `None` means "until disabled by hand".
-    Enabled { until: Option<Instant> },
+    /// `None` means "until disabled by hand". Wall-clock time, not
+    /// `Instant`: on macOS an `Instant` stops while the Mac sleeps, which
+    /// would keep a route enabled longer than the user chose.
+    Enabled { until: Option<SystemTime> },
 }
 
 #[derive(Clone, Debug)]
@@ -47,7 +49,7 @@ pub struct AppState {
     /// Enabled routes, by id (`<group>/<name>`), and when they expire
     /// (`None`: until disabled by hand). Saved in the vault so they survive a restart; keeping them in
     /// the Keychain means no program can enable a route by editing a file.
-    activations: Mutex<HashMap<String, Option<Instant>>>,
+    activations: Mutex<HashMap<String, Option<SystemTime>>>,
     audit: Mutex<VecDeque<AuditEntry>>,
     audit_file: Option<PathBuf>,
     /// Serializes appends to the audit file with its pruning.
@@ -166,7 +168,7 @@ impl AppState {
     }
 
     /// Callers lock `routes` before `activations`, always in that order.
-    fn persist(&self, routes: &[RouteConfig], activations: &HashMap<String, Option<Instant>>) -> Result<(), String> {
+    fn persist(&self, routes: &[RouteConfig], activations: &HashMap<String, Option<SystemTime>>) -> Result<(), String> {
         if let Some(e) = self.vault_error.lock().as_ref() {
             return Err(format!("Le coffre n’a pas pu être chargé, l’enregistrement est désactivé : {e}"));
         }
@@ -179,7 +181,7 @@ impl AppState {
         let routes = self.routes.read();
         let mut activations = self.activations.lock();
         let mut updated = activations.clone();
-        updated.insert(id.to_string(), duration.map(|d| Instant::now() + d));
+        updated.insert(id.to_string(), duration.map(|d| SystemTime::now() + d));
         self.persist(&routes, &updated)?;
         *activations = updated;
         Ok(())
@@ -206,7 +208,7 @@ impl AppState {
         let mut activations = self.activations.lock();
         match activations.get(id) {
             None => Activation::Disabled,
-            Some(Some(until)) if *until <= Instant::now() => {
+            Some(Some(until)) if *until <= SystemTime::now() => {
                 activations.remove(id);
                 Activation::Disabled
             }
@@ -282,14 +284,14 @@ impl AppState {
 
 /// Expirations as saved in the vault: milliseconds since the Unix epoch, or
 /// `None` for "until disabled". Expired activations are dropped.
-fn to_stored(activations: &HashMap<String, Option<Instant>>) -> HashMap<String, Option<u64>> {
-    let (now, wall_now) = (Instant::now(), SystemTime::now());
+fn to_stored(activations: &HashMap<String, Option<SystemTime>>) -> HashMap<String, Option<u64>> {
+    let now = SystemTime::now();
     activations
         .iter()
         .filter_map(|(id, until)| match until {
             None => Some((id.clone(), None)),
             Some(until) if *until > now => {
-                let at = (wall_now + (*until - now)).duration_since(UNIX_EPOCH).ok()?;
+                let at = until.duration_since(UNIX_EPOCH).ok()?;
                 Some((id.clone(), Some(at.as_millis() as u64)))
             }
             Some(_) => None,
@@ -298,19 +300,17 @@ fn to_stored(activations: &HashMap<String, Option<Instant>>) -> HashMap<String, 
 }
 
 /// Inverse of [`to_stored`], skipping expired activations and unknown routes.
-fn from_stored(stored: HashMap<String, Option<u64>>, routes: &[RouteConfig]) -> HashMap<String, Option<Instant>> {
-    let now = Instant::now();
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_default();
+fn from_stored(stored: HashMap<String, Option<u64>>, routes: &[RouteConfig]) -> HashMap<String, Option<SystemTime>> {
+    let now = SystemTime::now();
     stored
         .into_iter()
         .filter(|(id, _)| routes.iter().any(|r| &r.id() == id))
         .filter_map(|(id, at)| match at {
             None => Some((id, None)),
-            Some(ms) if ms > now_ms => Some((id, Some(now + Duration::from_millis(ms - now_ms)))),
-            Some(_) => None,
+            Some(ms) => {
+                let at = UNIX_EPOCH + Duration::from_millis(ms);
+                (at > now).then_some((id, Some(at)))
+            }
         })
         .collect()
 }

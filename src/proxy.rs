@@ -12,7 +12,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use tokio::net::TcpListener;
 
 const MAX_REQUEST_BODY: usize = 10 * 1024 * 1024;
@@ -135,7 +135,7 @@ fn route_json(state: &AppState, route: &RouteConfig) -> serde_json::Value {
         Activation::Disabled => (false, None),
         Activation::Enabled { until } => (
             true,
-            until.map(|u| u.saturating_duration_since(Instant::now()).as_secs()),
+            until.map(|u| u.duration_since(SystemTime::now()).unwrap_or_default().as_secs()),
         ),
     };
     json!({
@@ -276,6 +276,13 @@ fn upstream_url(
     if url.host() != base.host() || url.port_or_known_default() != base.port_or_known_default() {
         return Err("Le chemin sortirait de l’hôte cible.".into());
     }
+    // `..` and `%2e%2e` are resolved while parsing: they must not climb above
+    // the route's base path. Not a real boundary (the service may decode
+    // paths its own way), only a guard against the obvious escape.
+    let base_path = base.path().trim_end_matches('/');
+    if url.path() != base_path && !url.path().starts_with(&format!("{base_path}/")) {
+        return Err("Le chemin sortirait du chemin de base de la route.".into());
+    }
     url.set_query(query);
     if let AuthInjection::Query { param } = auth {
         let kept: Vec<(String, String)> = url
@@ -325,5 +332,13 @@ mod tests {
         assert_eq!(url.as_str(), "https://d.example.com/items?x=2&access_token=real");
 
         assert!(upstream_url("https://c.example.com", "@evil.com/x", None, &AuthInjection::Bearer, "t").is_err());
+
+        let base = "https://gitlab.example.com/api/v4/projects/42";
+        let url = upstream_url(base, "/issues", None, &AuthInjection::Bearer, "t").unwrap();
+        assert_eq!(url.path(), "/api/v4/projects/42/issues");
+        assert!(upstream_url(base, "/", None, &AuthInjection::Bearer, "t").is_ok());
+        for escape in ["/%2e%2e/%2e%2e/user", "/../../user", "/%2E%2E/43"] {
+            assert!(upstream_url(base, escape, None, &AuthInjection::Bearer, "t").is_err(), "{escape}");
+        }
     }
 }

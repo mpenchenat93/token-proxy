@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use token_proxy::admin::{self, AdminState};
-use token_proxy::approval::FixedApprover;
+use token_proxy::approval::{Approver, FixedApprover};
 use token_proxy::state::{Activation, AppState};
 use token_proxy::vault::{self, MemoryStore, SecretStore};
 
@@ -14,6 +14,10 @@ struct Harness {
 /// Starts the admin server with a vault shared with the caller, so tests can
 /// check what was persisted.
 async fn harness_with(approve: bool, store: Arc<MemoryStore>) -> Harness {
+    harness_with_approver(Arc::new(FixedApprover(approve)), store).await
+}
+
+async fn harness_with_approver(approver: Arc<dyn Approver>, store: Arc<MemoryStore>) -> Harness {
     struct Shared(Arc<MemoryStore>);
     impl SecretStore for Shared {
         fn load(&self) -> anyhow::Result<Option<Vec<u8>>> {
@@ -27,7 +31,7 @@ async fn harness_with(approve: bool, store: Arc<MemoryStore>) -> Harness {
     let app = Arc::new(AppState::new(Box::new(Shared(store)), None));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let state = Arc::new(AdminState::new(app.clone(), Arc::new(FixedApprover(approve)), port));
+    let state = Arc::new(AdminState::new(app.clone(), approver, port));
     tokio::spawn(async move { axum::serve(listener, admin::router(state)).await });
     Harness { app, base: format!("http://127.0.0.1:{port}"), client: reqwest::Client::new() }
 }
@@ -194,4 +198,89 @@ async fn reload_endpoint_reports_an_already_loaded_vault() {
     let resp = h.client.post(format!("{}/api/vault/reload", h.base)).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.json::<Value>().await.unwrap(), json!({ "reloaded": false }));
+}
+
+/// Approves everything and keeps the dialog texts.
+#[derive(Default)]
+struct RecordingApprover(Mutex<Vec<String>>);
+
+impl Approver for RecordingApprover {
+    fn approve(&self, reason: &str) -> Result<(), String> {
+        self.0.lock().unwrap().push(reason.to_string());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn moving_the_token_elsewhere_needs_the_token_again() {
+    let store = Arc::new(MemoryStore::default());
+    let approver = Arc::new(RecordingApprover::default());
+    let h = harness_with_approver(approver.clone(), store.clone()).await;
+    let mut local = coolify_route("local");
+    local["upstream"] = json!("http://127.0.0.1:8080");
+    for route in [coolify_route("prod"), local] {
+        assert_eq!(h.client.post(format!("{}/api/routes", h.base)).json(&route).send().await.unwrap().status(), 200);
+    }
+    let update = |id: &str, route: Value| h.client.put(format!("{}/api/routes/{id}", h.base)).json(&route).send();
+    let without_token = |name: &str, upstream: &str, auth: Value| {
+        json!({ "name": name, "upstream": upstream, "auth": auth, "description": "test" })
+    };
+    let asked = approver.0.lock().unwrap().len();
+
+    // Another host, another port, another way of sending the token: refused
+    // without the token, before any dialog.
+    for (id, route) in [
+        ("perso/prod", without_token("prod", "https://evil.example", json!("Bearer"))),
+        ("perso/prod", without_token("prod", "https://coolify.example.com:8443", json!("Bearer"))),
+        ("perso/prod", without_token("prod", "https://coolify.example.com", json!({ "Query": { "param": "t" } }))),
+        ("perso/local", without_token("local", "http://127.0.0.1:9090", json!("Bearer"))),
+    ] {
+        let resp = update(id, route).await.unwrap();
+        assert_eq!(resp.status(), 400);
+        assert!(resp.text().await.unwrap().contains("token"));
+    }
+    assert_eq!(approver.0.lock().unwrap().len(), asked);
+    assert_eq!(vault::load(store.as_ref()).unwrap().routes[0].upstream, "https://coolify.example.com");
+
+    // Same origin, another path: allowed, and the dialog shows before → after.
+    let resp = update("perso/prod", without_token("prod", "https://coolify.example.com/api", json!("Bearer"))).await;
+    assert_eq!(resp.unwrap().status(), 200);
+    let reason = approver.0.lock().unwrap().last().cloned().unwrap();
+    assert!(reason.contains("https://coolify.example.com → https://coolify.example.com/api"), "{reason}");
+
+    // With the token, the route can move.
+    let mut moved = without_token("prod", "https://other.example", json!({ "Header": { "name": "x-api-key" } }));
+    moved["token"] = json!("another-token");
+    assert_eq!(update("perso/prod", moved).await.unwrap().status(), 200);
+    let reason = approver.0.lock().unwrap().last().cloned().unwrap();
+    assert!(reason.contains("https://coolify.example.com/api → https://other.example"), "{reason}");
+    assert!(reason.contains("en-tête Authorization → par en-tête x-api-key"), "{reason}");
+    assert!(reason.contains("nouveau token"), "{reason}");
+}
+
+#[tokio::test]
+async fn plain_http_is_only_accepted_on_the_local_network() {
+    let h = harness(true).await;
+    let create = |name: &str, upstream: &str| {
+        let mut route = coolify_route(name);
+        route["upstream"] = json!(upstream);
+        h.client.post(format!("{}/api/routes", h.base)).json(&route).send()
+    };
+    for (i, upstream) in ["http://coolify.example.com", "http://8.8.8.8", "http://localhost.example.com"].iter().enumerate() {
+        assert_eq!(create(&format!("public{i}"), upstream).await.unwrap().status(), 400, "{upstream}");
+    }
+    for (i, upstream) in [
+        "http://localhost:11434",
+        "http://127.0.0.1:8080",
+        "http://192.168.1.10",
+        "http://10.0.0.2",
+        "http://100.101.102.103",
+        "http://[::1]:8080",
+        "http://nas.local",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(create(&format!("local{i}"), upstream).await.unwrap().status(), 200, "{upstream}");
+    }
 }

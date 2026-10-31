@@ -83,6 +83,22 @@ function toInput(form: FormState): RouteInput {
   }
 }
 
+/** `scheme://host:port`, or the text itself while it is not a URL. */
+function originOf(url: string): string {
+  try {
+    return new URL(url.trim()).origin
+  } catch {
+    return url.trim()
+  }
+}
+
+/** Whether the token would go elsewhere than `route` sends it: the server then requires it again. */
+function needsToken(form: FormState, route: RouteView | null): boolean {
+  if (!route) return true
+  const auth = JSON.stringify(toInput(form).auth)
+  return originOf(form.upstream) !== originOf(route.upstream) || auth !== JSON.stringify(route.auth)
+}
+
 interface Props {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -114,6 +130,8 @@ export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
   useEffect(() => {
     if (!open) save.reset()
   }, [open])
+
+  const tokenRequired = needsToken(form, route)
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((f) => ({ ...f, [key]: value }))
@@ -182,9 +200,9 @@ export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
               type="password"
               value={form.token}
               onChange={(e) => set('token', e.target.value)}
-              placeholder={route ? t.keepToken : t.pasteToken}
+              placeholder={!route ? t.pasteToken : tokenRequired ? t.pasteTokenAgain : t.keepToken}
               autoComplete="off"
-              required={!route}
+              required={tokenRequired}
             />
           </Field>
 

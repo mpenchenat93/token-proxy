@@ -42,7 +42,7 @@ fn activations_survive_a_restart() {
     assert_eq!(restarted.activation("perso/forever"), Activation::Enabled { until: None });
     match restarted.activation("perso/timed") {
         Activation::Enabled { until: Some(until) } => {
-            let left = until.saturating_duration_since(std::time::Instant::now());
+            let left = until.duration_since(std::time::SystemTime::now()).unwrap_or_default();
             assert!(left > Duration::from_secs(590) && left <= Duration::from_secs(600), "{left:?}");
         }
         other => panic!("expected a timed activation, got {other:?}"),
