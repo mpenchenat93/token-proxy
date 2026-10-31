@@ -2,6 +2,7 @@ import { HeadContent, Scripts, createRootRouteWithContext } from '@tanstack/reac
 import type { QueryClient } from '@tanstack/react-query'
 import { Toaster } from '#/components/ui/sonner'
 import { TooltipProvider } from '#/components/ui/tooltip'
+import { I18nProvider } from '#/lib/i18n'
 import { THEME_INIT_SCRIPT, ThemeProvider, useTheme } from '#/lib/theme'
 import appCss from '../styles.css?url'
 
@@ -27,14 +28,16 @@ export const Route = createRootRouteWithContext<RouterContext>()({
 
 function RootDocument({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="fr" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>
       <body>
         <ThemeProvider>
-          <TooltipProvider>{children}</TooltipProvider>
-          <ThemedToaster />
+          <I18nProvider>
+            <TooltipProvider>{children}</TooltipProvider>
+            <ThemedToaster />
+          </I18nProvider>
         </ThemeProvider>
         <Scripts />
       </body>

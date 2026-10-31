@@ -22,6 +22,7 @@ import {
 } from '#/components/ui/select'
 import { Textarea } from '#/components/ui/textarea'
 import { api, DEFAULT_GROUP, routeId } from '#/lib/api'
+import { useI18n } from '#/lib/i18n'
 import type { AuthInjection, RouteInput, RouteView } from '#/lib/api'
 
 type AuthMode = 'bearer' | 'header' | 'query'
@@ -92,6 +93,7 @@ interface Props {
 }
 
 export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
+  const { t } = useI18n()
   const queryClient = useQueryClient()
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
 
@@ -104,9 +106,7 @@ export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
       route ? api.updateRoute(route, input) : api.createRoute(input),
     onSuccess: (saved) => {
       queryClient.invalidateQueries({ queryKey: ['routes'] })
-      toast.success(`Route « ${routeId(saved)} » enregistrée`, {
-        description: 'Elle reste désactivée tant que tu ne l’actives pas.',
-      })
+      toast.success(t.routeSaved(routeId(saved)), { description: t.routeSavedDescription })
       onOpenChange(false)
     },
   })
@@ -122,11 +122,8 @@ export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
     <Dialog open={open} onOpenChange={(o) => !save.isPending && onOpenChange(o)}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>{route ? `Modifier « ${routeId(route)} »` : 'Nouvelle route'}</DialogTitle>
-          <DialogDescription>
-            Le token est stocké dans le Trousseau macOS et n’est plus jamais affiché. Ce que la
-            route peut faire dépend des permissions du token. L’enregistrement demande Touch ID.
-          </DialogDescription>
+          <DialogTitle>{route ? t.editTitle(routeId(route)) : t.newRoute}</DialogTitle>
+          <DialogDescription>{t.formDescription}</DialogDescription>
         </DialogHeader>
 
         <form
@@ -138,7 +135,7 @@ export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
           }}
         >
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Groupe" hint="perso, ou un client">
+            <Field label={t.group} hint={t.groupHint}>
               <Input
                 value={form.group}
                 onChange={(e) => set('group', e.target.value)}
@@ -153,7 +150,7 @@ export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
                 ))}
               </datalist>
             </Field>
-            <Field label="Nom" hint="Le service, sans le groupe">
+            <Field label={t.name} hint={t.nameHint}>
               <Input
                 value={form.name}
                 onChange={(e) => set('name', e.target.value)}
@@ -165,13 +162,13 @@ export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
             </Field>
           </div>
           <p className="text-muted-foreground -mt-2 text-xs">
-            L’IA appellera{' '}
+            {t.aiWillCall}{' '}
             <span className="font-mono">
-              /{form.group.trim() || DEFAULT_GROUP}/{form.name.trim() || '<nom>'}/…
+              /{form.group.trim() || DEFAULT_GROUP}/{form.name.trim() || t.namePlaceholder}/…
             </span>
           </p>
 
-          <Field label="URL du service">
+          <Field label={t.serviceUrl}>
             <Input
               value={form.upstream}
               onChange={(e) => set('upstream', e.target.value)}
@@ -180,32 +177,32 @@ export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
             />
           </Field>
 
-          <Field label="Token">
+          <Field label={t.token}>
             <Input
               type="password"
               value={form.token}
               onChange={(e) => set('token', e.target.value)}
-              placeholder={route ? 'Laisser vide pour garder le token actuel' : 'Colle le token'}
+              placeholder={route ? t.keepToken : t.pasteToken}
               autoComplete="off"
               required={!route}
             />
           </Field>
 
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Transmission du token">
+            <Field label={t.tokenTransmission}>
               <Select value={form.authMode} onValueChange={(v) => set('authMode', v as AuthMode)}>
                 <SelectTrigger className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="bearer">Authorization: Bearer</SelectItem>
-                  <SelectItem value="header">En-tête personnalisé</SelectItem>
-                  <SelectItem value="query">Paramètre d’URL</SelectItem>
+                  <SelectItem value="header">{t.customHeader}</SelectItem>
+                  <SelectItem value="query">{t.queryParameter}</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
             {form.authMode !== 'bearer' && (
-              <Field label={form.authMode === 'header' ? 'Nom de l’en-tête' : 'Nom du paramètre'}>
+              <Field label={form.authMode === 'header' ? t.headerName : t.parameterName}>
                 <Input
                   value={form.authValue}
                   onChange={(e) => set('authValue', e.target.value)}
@@ -217,7 +214,7 @@ export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
             )}
           </div>
 
-          <Field label="Description" hint="Affichée à l’IA quand elle liste les routes">
+          <Field label={t.description} hint={t.descriptionHint}>
             <Textarea
               value={form.description}
               onChange={(e) => set('description', e.target.value)}
@@ -230,11 +227,11 @@ export function RouteFormDialog({ open, onOpenChange, route, groups }: Props) {
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={save.isPending}>
-            Annuler
+            {t.cancel}
           </Button>
           <Button type="submit" form="route-form" disabled={save.isPending}>
             {save.isPending ? <Loader2 className="animate-spin" /> : <Fingerprint />}
-            {save.isPending ? 'En attente de Touch ID…' : 'Enregistrer'}
+            {save.isPending ? t.waitingForTouchId : t.save}
           </Button>
         </DialogFooter>
       </DialogContent>

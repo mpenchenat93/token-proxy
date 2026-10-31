@@ -15,7 +15,7 @@ agent ──► http://127.0.0.1:8787/acme/coolify/api/v1/applications
   <img alt="Token Proxy admin UI: routes grouped by owner, their state and the latest requests" src="docs/screenshots/dashboard-light.png">
 </picture>
 
-> The admin UI and the proxy's messages are in French. The screenshots show demo data.
+> The admin UI is in English and French: it follows your browser language and has a switcher. Messages from the server (API errors, Touch ID prompts, audit notes) are in French. The screenshots show demo data.
 
 ## Why
 

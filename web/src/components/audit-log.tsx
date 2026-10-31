@@ -1,13 +1,15 @@
 import { useQuery } from '@tanstack/react-query'
 import { cn } from '#/lib/utils'
 import { api } from '#/lib/api'
+import { DATE_LOCALE, useI18n } from '#/lib/i18n'
 
 export function AuditLog() {
+  const { locale, t } = useI18n()
   const audit = useQuery({ queryKey: ['audit'], queryFn: api.audit, refetchInterval: 2000 })
   const entries = audit.data?.entries ?? []
 
   if (entries.length === 0) {
-    return <p className="text-muted-foreground px-6 pb-6 text-sm">Aucune requête pour l’instant.</p>
+    return <p className="text-muted-foreground px-6 pb-6 text-sm">{t.noRequests}</p>
   }
 
   return (
@@ -17,7 +19,7 @@ export function AuditLog() {
           {entries.map((e, i) => (
             <tr key={`${e.at}-${i}`} className="border-b last:border-0">
               <td className="text-muted-foreground py-1.5 pr-4 whitespace-nowrap">
-                {new Date(e.at).toLocaleTimeString('fr-FR')}
+                {new Date(e.at).toLocaleTimeString(DATE_LOCALE[locale])}
               </td>
               <td className="py-1.5 pr-4 whitespace-nowrap">{e.route}</td>
               <td className="py-1.5 pr-4">{e.method}</td>

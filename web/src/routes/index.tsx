@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Copy, Fingerprint, KeyRound, Loader2, Plus, RotateCw, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { AuditLog } from '#/components/audit-log'
+import { LanguageToggle } from '#/components/language-toggle'
 import { RouteFormDialog } from '#/components/route-form-dialog'
 import { RoutesTable } from '#/components/routes-table'
 import { ThemeToggle } from '#/components/theme-toggle'
@@ -17,6 +18,7 @@ import {
   SelectValue,
 } from '#/components/ui/select'
 import { api, groupsOf } from '#/lib/api'
+import { useI18n } from '#/lib/i18n'
 import type { RouteView } from '#/lib/api'
 
 export const Route = createFileRoute('/')({ component: Dashboard })
@@ -25,6 +27,7 @@ export const Route = createFileRoute('/')({ component: Dashboard })
 const ALL_GROUPS = '*'
 
 function Dashboard() {
+  const { t } = useI18n()
   const status = useQuery({ queryKey: ['status'], queryFn: api.status, refetchInterval: 2000 })
   const routes = useQuery({ queryKey: ['routes'], queryFn: api.routes, refetchInterval: 5000 })
   const [editor, setEditor] = useState<{ open: boolean; route: RouteView | null }>({
@@ -55,8 +58,9 @@ function Dashboard() {
         </div>
         <div className="flex gap-2">
           <Button onClick={() => setEditor({ open: true, route: null })}>
-            <Plus /> Ajouter une route
+            <Plus /> {t.addRoute}
           </Button>
+          <LanguageToggle />
           <ThemeToggle />
         </div>
       </header>
@@ -64,19 +68,14 @@ function Dashboard() {
       {status.data?.vault_error && <VaultErrorBanner error={status.data.vault_error} />}
       {status.data?.approval_pending && (
         <Banner tone="info">
-          <Fingerprint className="size-4" /> Une demande Touch ID est en attente. N’approuve que ce que
-          tu as demandé toi-même.
+          <Fingerprint className="size-4" /> {t.approvalPending}
         </Banner>
       )}
 
       <Card>
         <CardHeader>
-          <CardTitle>Routes</CardTitle>
-          <CardDescription>
-            L’IA appelle /&lt;groupe&gt;/&lt;route&gt;/… : le groupe dit à qui appartient le compte.
-            Chaque route démarre désactivée. Activer, ajouter, modifier ou supprimer une route
-            demande Touch ID ; la désactiver, jamais.
-          </CardDescription>
+          <CardTitle>{t.routesTitle}</CardTitle>
+          <CardDescription>{t.routesDescription}</CardDescription>
           {groups.length > 1 && (
             <CardAction>
               <Select value={shownGroup} onValueChange={setGroupFilter}>
@@ -84,7 +83,7 @@ function Dashboard() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value={ALL_GROUPS}>Tous les groupes</SelectItem>
+                  <SelectItem value={ALL_GROUPS}>{t.allGroups}</SelectItem>
                   {groups.map((g) => (
                     <SelectItem key={g} value={g}>
                       {g}
@@ -105,11 +104,11 @@ function Dashboard() {
           ) : (
             <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-12 text-center">
               <p className="text-muted-foreground text-sm">
-                {routes.isLoading ? 'Chargement…' : 'Aucune route pour l’instant. Enregistre un premier token pour commencer.'}
+                {routes.isLoading ? t.loading : t.noRoutes}
               </p>
               {!routes.isLoading && (
                 <Button variant="outline" onClick={() => setEditor({ open: true, route: null })}>
-                  <Plus /> Ajouter une route
+                  <Plus /> {t.addRoute}
                 </Button>
               )}
             </div>
@@ -119,10 +118,8 @@ function Dashboard() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Requêtes récentes</CardTitle>
-          <CardDescription>
-            Depuis le démarrage du service. Les 30 derniers jours sont gardés dans ~/Library/Logs/token-proxy/audit.log
-          </CardDescription>
+          <CardTitle>{t.recentRequests}</CardTitle>
+          <CardDescription>{t.recentRequestsDescription}</CardDescription>
         </CardHeader>
         <AuditLog />
       </Card>
@@ -144,22 +141,23 @@ function ProxyLine({
   proxy: { state: string; url?: string; error?: string } | undefined
   unreachable: boolean
 }) {
+  const { t } = useI18n()
   if (unreachable) {
-    return <p className="text-destructive-foreground text-sm">API d’administration injoignable</p>
+    return <p className="text-destructive-foreground text-sm">{t.adminUnreachable}</p>
   }
   if (proxy?.state === 'listening' && proxy.url) {
     const url = proxy.url
     return (
       <p className="text-muted-foreground flex items-center gap-2 text-sm">
         <span className="bg-success size-2 rounded-full" />
-        Proxy sur <span className="font-mono">{url}</span>
+        {t.proxyOn} <span className="font-mono">{url}</span>
         <button
           type="button"
           className="hover:text-foreground"
-          aria-label="Copier l’URL du proxy"
+          aria-label={t.copyProxyUrl}
           onClick={() => {
             navigator.clipboard.writeText(url)
-            toast.success('URL du proxy copiée')
+            toast.success(t.proxyUrlCopied)
           }}
         >
           <Copy className="size-3.5" />
@@ -168,17 +166,18 @@ function ProxyLine({
     )
   }
   if (proxy?.state === 'failed') {
-    return <p className="text-destructive-foreground text-sm">Proxy arrêté : {proxy.error}</p>
+    return <p className="text-destructive-foreground text-sm">{t.proxyStopped(proxy.error ?? '')}</p>
   }
-  return <p className="text-muted-foreground text-sm">Démarrage…</p>
+  return <p className="text-muted-foreground text-sm">{t.starting}</p>
 }
 
 function VaultErrorBanner({ error }: { error: string }) {
+  const { t } = useI18n()
   const queryClient = useQueryClient()
   const reload = useMutation({
     mutationFn: api.reloadVault,
     onSuccess: () => {
-      toast.success('Coffre chargé, les routes sont de retour')
+      toast.success(t.vaultReloaded)
       queryClient.invalidateQueries()
     },
     onError: (e) => toast.error(e.message),
@@ -190,14 +189,11 @@ function VaultErrorBanner({ error }: { error: string }) {
       action={
         <Button size="sm" variant="outline" onClick={() => reload.mutate()} disabled={reload.isPending}>
           {reload.isPending ? <Loader2 className="animate-spin" /> : <RotateCw />}
-          {reload.isPending ? 'En attente du Trousseau…' : 'Réessayer'}
+          {reload.isPending ? t.waitingForKeychain : t.retry}
         </Button>
       }
     >
-      <span>
-        Le coffre du Trousseau n’a pas pu être lu : aucune route n’est disponible ({error}).
-        Clique sur « Réessayer », puis sur « Toujours autoriser » dans la demande de macOS.
-      </span>
+      <span>{t.vaultError(error)}</span>
     </Banner>
   )
 }
