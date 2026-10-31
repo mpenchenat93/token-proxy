@@ -6,4 +6,4 @@ set -euo pipefail
 LABEL="local.token-proxy"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/$LABEL.plist" "$HOME/.local/bin/token-proxy"
-echo "✓ token-proxy désinstallé (les routes restent dans le Trousseau)"
+echo "✓ token-proxy uninstalled (the routes stay in the Keychain)"

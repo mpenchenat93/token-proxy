@@ -120,7 +120,7 @@ The JSON error message gives the cause.
 
 ## Troubleshooting
 
-**No routes, and a red banner "Le coffre du Trousseau n'a pas pu être lu".** macOS refused Keychain access at startup, which happens right after a macOS update when the prompt shows during login. Your routes are not lost and nothing is saved until the vault is read again. The proxy retries after 30 s, 2 min and 10 min; you can also click "Réessayer" in the banner. Either way, answer "Always Allow" to the macOS prompt.
+**No routes, and a red banner "The Keychain vault could not be read".** macOS refused Keychain access at startup, which happens right after a macOS update when the prompt shows during login. Your routes are not lost and nothing is saved until the vault is read again. The proxy retries after 30 s, 2 min and 10 min; you can also click "Retry" in the banner. Either way, answer "Always Allow" to the macOS prompt.
 
 **Nothing answers on port 8787 or 8788.** The service is stopped. Restart it:
 

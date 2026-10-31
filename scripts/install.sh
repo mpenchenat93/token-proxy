@@ -11,16 +11,16 @@ LOG_DIR="$HOME/Library/Logs/token-proxy"
 DOMAIN="gui/$(id -u)"
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 
-echo "→ Construction de l’interface web"
+echo "→ Building the web UI"
 cd "$ROOT/web"
 [ -d node_modules ] || npm ci --no-audit --no-fund
 npm run build --silent >/dev/null
 
-echo "→ Compilation du binaire"
+echo "→ Building the binary"
 cd "$ROOT"
 cargo build --release --quiet
 
-echo "→ Installation de $BIN"
+echo "→ Installing $BIN"
 mkdir -p "$(dirname "$BIN")" "$LOG_DIR" "$(dirname "$PLIST")"
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 install -m 755 "$ROOT/target/release/token-proxy" "$BIN"
@@ -53,19 +53,19 @@ cat > "$PLIST" <<EOF
 </plist>
 EOF
 
-echo "→ Démarrage du LaunchAgent"
-echo "  (le nouveau binaire va demander l’accès au Trousseau : clique sur « Toujours autoriser »)"
+echo "→ Starting the LaunchAgent"
+echo "  (the new binary will ask for Keychain access: click \"Always Allow\")"
 launchctl bootstrap "$DOMAIN" "$PLIST"
 
 # Startup waits for the Keychain prompt answer, so allow up to two minutes.
 for _ in $(seq 1 240); do
   if curl -fsS http://127.0.0.1:8788/api/status >/dev/null 2>&1; then
-    echo "✓ token-proxy tourne"
-    echo "  Interface : http://127.0.0.1:8788"
-    echo "  Proxy :     http://127.0.0.1:8787"
+    echo "✓ token-proxy is running"
+    echo "  Admin UI: http://127.0.0.1:8788"
+    echo "  Proxy:    http://127.0.0.1:8787"
     exit 0
   fi
   sleep 0.5
 done
-echo "✗ token-proxy ne répond pas ; voir $LOG_DIR/token-proxy.log" >&2
+echo "✗ token-proxy is not answering; see $LOG_DIR/token-proxy.log" >&2
 exit 1
