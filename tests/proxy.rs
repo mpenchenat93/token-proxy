@@ -55,7 +55,7 @@ async fn disabled_route_is_rejected_without_reaching_upstream() {
     let h = harness().await;
     let resp = h.client.get(format!("{}/perso/coolify/api/v1/applications", h.base)).send().await.unwrap();
     assert_eq!(resp.status(), 403);
-    assert!(resp.text().await.unwrap().contains("désactivée"));
+    assert!(resp.text().await.unwrap().contains("disabled"));
     assert_eq!(hits(&h.upstream).await, 0);
 }
 

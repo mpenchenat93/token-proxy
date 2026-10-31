@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const AUDIT_CAPACITY: usize = 500;
@@ -50,6 +51,11 @@ pub struct AppState {
     /// (`None`: until disabled by hand). Saved in the vault so they survive a restart; keeping them in
     /// the Keychain means no program can enable a route by editing a file.
     activations: Mutex<HashMap<String, Option<SystemTime>>>,
+    /// Bumped by every revocation, so that an activation being saved at the
+    /// same time is not applied over it.
+    revocations: AtomicU64,
+    /// One vault write at a time; see [`AppState::persist`].
+    save_lock: Mutex<()>,
     audit: Mutex<VecDeque<AuditEntry>>,
     audit_file: Option<PathBuf>,
     /// Serializes appends to the audit file with its pruning.
@@ -83,6 +89,8 @@ impl AppState {
             store,
             routes: RwLock::new(routes),
             activations: Mutex::new(activations),
+            revocations: AtomicU64::new(0),
+            save_lock: Mutex::new(()),
             audit: Mutex::new(VecDeque::with_capacity(AUDIT_CAPACITY)),
             audit_file,
             audit_file_lock: Mutex::new(()),
@@ -103,13 +111,16 @@ impl AppState {
     /// Blocks while macOS shows its Keychain prompt.
     pub fn reload_vault(&self) -> Result<bool, String> {
         let Some(_guard) = self.reload_lock.try_lock() else {
-            return Err("Une lecture du Trousseau est déjà en cours.".to_string());
+            return Err(tr!("Une lecture du Trousseau est déjà en cours.", "The Keychain is already being read."));
         };
         if self.vault_error.lock().is_none() {
             return Ok(false);
         }
         match vault::load(self.store.as_ref()) {
             Ok(data) => {
+                // Not during the load, which may wait for a prompt: a save
+                // in progress fails anyway while the vault is unreadable.
+                let _save = self.save_lock.lock();
                 let mut routes = self.routes.write();
                 let mut activations = self.activations.lock();
                 *activations = from_stored(data.activations, &data.routes);
@@ -136,72 +147,108 @@ impl AppState {
 
     /// Adds a route, or replaces the one whose id is `previous_id`.
     pub fn upsert_route(&self, route: RouteConfig, previous_id: Option<&str>) -> Result<(), String> {
-        let mut routes = self.routes.write();
+        let _save = self.save_lock.lock();
+        let mut routes = self.routes();
         crate::config::validate_route(&route, &routes, previous_id)?;
-        let mut updated = routes.clone();
-        match previous_id.and_then(|id| updated.iter().position(|r| r.id() == id)) {
-            Some(i) => updated[i] = route,
-            None => updated.push(route),
+        match previous_id.and_then(|id| routes.iter().position(|r| r.id() == id)) {
+            Some(i) => routes[i] = route,
+            None => routes.push(route),
         }
-        let mut activations = self.activations.lock();
-        let mut updated_activations = activations.clone();
-        // A modified route must be enabled again explicitly.
+        // A modified route must be enabled again explicitly. Revoked right
+        // away: if saving fails, the route is unchanged but disabled.
         if let Some(id) = previous_id {
-            updated_activations.remove(id);
+            self.revoke(|activations| {
+                activations.remove(id);
+            });
         }
-        self.persist(&updated, &updated_activations)?;
-        *routes = updated;
-        *activations = updated_activations;
+        self.persist(&routes, &self.activations_copy())?;
+        *self.routes.write() = routes;
         Ok(())
     }
 
     pub fn delete_route(&self, id: &str) -> Result<(), String> {
-        let mut routes = self.routes.write();
-        let updated: Vec<RouteConfig> = routes.iter().filter(|r| r.id() != id).cloned().collect();
-        let mut activations = self.activations.lock();
-        let mut updated_activations = activations.clone();
-        updated_activations.remove(id);
-        self.persist(&updated, &updated_activations)?;
-        *routes = updated;
-        *activations = updated_activations;
+        let _save = self.save_lock.lock();
+        let routes: Vec<RouteConfig> = self.routes().into_iter().filter(|r| r.id() != id).collect();
+        self.revoke(|activations| {
+            activations.remove(id);
+        });
+        self.persist(&routes, &self.activations_copy())?;
+        *self.routes.write() = routes;
         Ok(())
     }
 
-    /// Callers lock `routes` before `activations`, always in that order.
+    /// Writes the vault. Callers hold `save_lock` and pass copies: the data
+    /// locks are never held during a Keychain write, which may wait for a
+    /// macOS prompt, so proxied requests never wait for one.
     fn persist(&self, routes: &[RouteConfig], activations: &HashMap<String, Option<SystemTime>>) -> Result<(), String> {
         if let Some(e) = self.vault_error.lock().as_ref() {
-            return Err(format!("Le coffre n’a pas pu être chargé, l’enregistrement est désactivé : {e}"));
+            return Err(tr!(
+                "Le coffre n’a pas pu être chargé, l’enregistrement est désactivé : {e}",
+                "The vault could not be loaded, saving is disabled: {e}"
+            ));
         }
         let data = VaultData { routes: routes.to_vec(), activations: to_stored(activations) };
         vault::save(self.store.as_ref(), &data).map_err(|e| format!("{e:#}"))
     }
 
+    /// Applies a change that reduces access right away, without waiting for
+    /// a save in progress, and cancels any activation being saved.
+    fn revoke(&self, change: impl FnOnce(&mut HashMap<String, Option<SystemTime>>)) {
+        let mut activations = self.activations.lock();
+        change(&mut activations);
+        // Read and written under `activations` only.
+        self.revocations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A copy, so that the lock is released before saving: a guard taken in
+    /// the arguments of [`Self::persist`] would be held during the save.
+    fn activations_copy(&self) -> HashMap<String, Option<SystemTime>> {
+        self.activations.lock().clone()
+    }
+
+    /// Saves the current state, after a revocation.
+    fn save_current(&self) -> Result<(), String> {
+        let _save = self.save_lock.lock();
+        let routes = self.routes();
+        self.persist(&routes, &self.activations_copy())
+    }
+
     /// Enables a route only once the activation is saved.
     pub fn enable(&self, id: &str, duration: Option<Duration>) -> Result<(), String> {
-        let routes = self.routes.read();
+        let _save = self.save_lock.lock();
+        let until = duration.map(|d| SystemTime::now() + d);
+        let (mut activations, revocations) = {
+            let activations = self.activations.lock();
+            (activations.clone(), self.revocations.load(Ordering::Relaxed))
+        };
+        activations.insert(id.to_string(), until);
+        self.persist(&self.routes(), &activations)?;
         let mut activations = self.activations.lock();
-        let mut updated = activations.clone();
-        updated.insert(id.to_string(), duration.map(|d| SystemTime::now() + d));
-        self.persist(&routes, &updated)?;
-        *activations = updated;
+        // A route disabled while this was being saved stays disabled; the
+        // disable's own save, which waits for this one, fixes the vault.
+        if self.revocations.load(Ordering::Relaxed) != revocations {
+            return Err(tr!(
+                "une désactivation a eu lieu pendant l’enregistrement",
+                "a route was disabled while saving"
+            ));
+        }
+        activations.insert(id.to_string(), until);
         Ok(())
     }
 
     /// Disables a route right away; the error only means the change could
     /// not be saved, so the route would be enabled again after a restart.
     pub fn disable(&self, id: &str) -> Result<(), String> {
-        let routes = self.routes.read();
-        let mut activations = self.activations.lock();
-        activations.remove(id);
-        self.persist(&routes, &activations)
+        self.revoke(|activations| {
+            activations.remove(id);
+        });
+        self.save_current()
     }
 
     /// Same as [`Self::disable`], for every route.
     pub fn disable_all(&self) -> Result<(), String> {
-        let routes = self.routes.read();
-        let mut activations = self.activations.lock();
-        activations.clear();
-        self.persist(&routes, &activations)
+        self.revoke(HashMap::clear);
+        self.save_current()
     }
 
     pub fn activation(&self, id: &str) -> Activation {

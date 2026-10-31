@@ -59,7 +59,7 @@ pub fn router(state: Arc<AdminState>) -> Router {
         .route("/routes/{group}/{name}/disable", post(disable_route))
         .route("/disable-all", post(disable_all))
         .route("/vault/reload", post(reload_vault))
-        .fallback(|| async { error(StatusCode::NOT_FOUND, "Point d’API inconnu.") });
+        .fallback(|| async { error(StatusCode::NOT_FOUND, tr!("Point d’API inconnu.", "Unknown API endpoint.")) });
     Router::new()
         .nest("/api", api)
         .fallback(static_asset)
@@ -72,14 +72,14 @@ pub fn router(state: Arc<AdminState>) -> Router {
 async fn guard(State(state): State<Arc<AdminState>>, req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
     if !state.allowed_hosts.iter().any(|h| h == host) {
-        return error(StatusCode::FORBIDDEN, "En-tête Host inattendu.");
+        return error(StatusCode::FORBIDDEN, tr!("En-tête Host inattendu.", "Unexpected Host header."));
     }
     let safe_method = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     if !safe_method
         && let Some(origin) = req.headers().get(header::ORIGIN)
         && !state.allowed_origins.iter().any(|o| origin.as_bytes() == o.as_bytes())
     {
-        return error(StatusCode::FORBIDDEN, "Requête d’une autre origine refusée.");
+        return error(StatusCode::FORBIDDEN, tr!("Requête d’une autre origine refusée.", "Request from another origin refused."));
     }
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
@@ -87,6 +87,16 @@ async fn guard(State(state): State<Arc<AdminState>>, req: Request, next: Next) -
     headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     response
+}
+
+/// Runs a state change that saves the vault off the async workers: the
+/// Keychain write may wait for a macOS prompt.
+async fn saving<T: Send + 'static>(
+    app: &Arc<AppState>,
+    change: impl FnOnce(&AppState) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || change(&app)).await.unwrap_or_else(|e| Err(e.to_string()))
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -97,13 +107,16 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
 #[allow(clippy::result_large_err)]
 async fn require_approval(state: &AdminState, reason: String) -> Result<(), Response> {
     let Ok(_guard) = state.approval_lock.try_lock() else {
-        return Err(error(StatusCode::CONFLICT, "Une autre demande d’approbation est déjà en attente."));
+        return Err(error(
+            StatusCode::CONFLICT,
+            tr!("Une autre demande d’approbation est déjà en attente.", "Another approval request is already pending."),
+        ));
     };
     let approver = state.approver.clone();
     let outcome = tokio::task::spawn_blocking(move || approver.approve(&reason))
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
-    outcome.map_err(|e| error(StatusCode::FORBIDDEN, format!("Non approuvé : {e}")))
+    outcome.map_err(|e| error(StatusCode::FORBIDDEN, tr!("Non approuvé : {e}", "Not approved: {e}")))
 }
 
 /// `scheme://host[:port]` of a service URL, for approval dialogs: the scheme
@@ -116,31 +129,37 @@ fn origin_of(upstream: &str) -> String {
 
 fn auth_label(auth: &AuthInjection) -> String {
     match auth {
-        AuthInjection::Bearer => "en-tête Authorization".to_string(),
-        AuthInjection::Header { name } => format!("en-tête {name}"),
-        AuthInjection::Query { param } => format!("paramètre d’URL {param}"),
+        AuthInjection::Bearer => tr!("en-tête Authorization", "Authorization header"),
+        AuthInjection::Header { name } => tr!("en-tête {name}", "{name} header"),
+        AuthInjection::Query { param } => tr!("paramètre d’URL {param}", "query parameter {param}"),
     }
 }
 
 /// Describes an edit for the approval dialog, each change that matters for
-/// the token shown as before → after.
+/// the token shown as before → after. Reasons complete the system sentence
+/// "token-proxy is trying to …".
 fn change_reason(previous: &RouteConfig, route: &RouteConfig) -> String {
     let mut changes = Vec::new();
     if previous.id() != route.id() {
-        changes.push(format!("renommée « {} »", route.id()));
+        changes.push(tr!("renommée « {} »", "renamed “{}”", route.id()));
     }
     if previous.upstream == route.upstream {
-        changes.push(format!("vers {}", route.upstream));
+        changes.push(tr!("vers {}", "to {}", route.upstream));
     } else {
         changes.push(format!("{} → {}", previous.upstream, route.upstream));
     }
     if previous.auth != route.auth {
-        changes.push(format!("token par {} → par {}", auth_label(&previous.auth), auth_label(&route.auth)));
+        let (before, after) = (auth_label(&previous.auth), auth_label(&route.auth));
+        changes.push(tr!("token par {before} → par {after}", "token by {before} → by {after}"));
     }
     if previous.token != route.token {
-        changes.push("nouveau token".to_string());
+        changes.push(tr!("nouveau token", "new token"));
     }
-    format!("modifier la route « {} » : {}", previous.id(), changes.join(" ; "))
+    let id = previous.id();
+    match crate::i18n::lang() {
+        crate::i18n::Lang::Fr => format!("modifier la route « {id} » : {}", changes.join(" ; ")),
+        crate::i18n::Lang::En => format!("change the route “{id}”: {}", changes.join("; ")),
+    }
 }
 
 #[derive(Serialize)]
@@ -260,7 +279,7 @@ fn find_route(state: &AdminState, (group, name): &(String, String)) -> Result<Ro
     state
         .app
         .route(&id)
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, format!("Route « {id} » inconnue.")))
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, tr!("Route « {id} » inconnue.", "Unknown route “{id}”.")))
 }
 
 async fn update_route(
@@ -289,18 +308,24 @@ async fn save_route(state: &AdminState, route: RouteConfig, previous: Option<Rou
     {
         return error(
             StatusCode::BAD_REQUEST,
-            "Colle le token à nouveau : l’URL du service (schéma, hôte ou port) ou la transmission du token a changé.",
+            tr!(
+                "Colle le token à nouveau : l’URL du service (schéma, hôte ou port) ou la transmission du token a changé.",
+                "Paste the token again: the service URL (scheme, host or port) or how the token is sent has changed."
+            ),
         );
     }
     let id = route.id();
     let reason = match &previous {
-        None => format!("ajouter la route « {id} » vers {} (token par {})", route.upstream, auth_label(&route.auth)),
+        None => {
+            let (upstream, auth) = (&route.upstream, auth_label(&route.auth));
+            tr!("ajouter la route « {id} » vers {upstream} (token par {auth})", "add the route “{id}” to {upstream} (token by {auth})")
+        }
         Some(previous) => change_reason(previous, &route),
     };
     if let Err(response) = require_approval(state, reason).await {
         return response;
     }
-    match state.app.upsert_route(route, previous_id.as_deref()) {
+    match saving(&state.app, move |app| app.upsert_route(route, previous_id.as_deref())).await {
         Ok(()) => {
             let view = state.app.route(&id).map(|r| route_view(&state.app, r));
             Json(view).into_response()
@@ -315,11 +340,13 @@ async fn delete_route(State(state): State<Arc<AdminState>>, Path(path): Path<(St
         Err(response) => return response,
     };
     let id = route.id();
-    let reason = format!("supprimer la route « {id} » ({})", origin_of(&route.upstream));
+    let origin = origin_of(&route.upstream);
+    let reason = tr!("supprimer la route « {id} » ({origin})", "delete the route “{id}” ({origin})");
     if let Err(response) = require_approval(&state, reason).await {
         return response;
     }
-    match state.app.delete_route(&id) {
+    let deleted = id.clone();
+    match saving(&state.app, move |app| app.delete_route(&deleted)).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -342,39 +369,50 @@ async fn enable_route(
     };
     let id = route.id();
     if input.minutes == Some(0) || input.minutes.is_some_and(|m| m > 24 * 60) {
-        return error(StatusCode::BAD_REQUEST, "La durée doit être comprise entre 1 minute et 24 heures.");
+        return error(
+            StatusCode::BAD_REQUEST,
+            tr!("La durée doit être comprise entre 1 minute et 24 heures.", "The duration must be between 1 minute and 24 hours."),
+        );
     }
     let duration = match input.minutes {
-        Some(m) => format!("pendant {m} min"),
-        None => "jusqu’à désactivation".to_string(),
+        Some(m) => tr!("pendant {m} min", "for {m} min"),
+        None => tr!("jusqu’à désactivation", "until disabled"),
     };
-    let reason = format!("activer la route « {id} » ({}) {duration}", origin_of(&route.upstream));
+    let origin = origin_of(&route.upstream);
+    let reason = tr!("activer la route « {id} » ({origin}) {duration}", "enable the route “{id}” ({origin}) {duration}");
     if let Err(response) = require_approval(&state, reason).await {
         return response;
     }
-    if let Err(e) = state.app.enable(&id, input.minutes.map(|m| Duration::from_secs(m * 60))) {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, format!("Route non activée : {e}"));
+    let duration = input.minutes.map(|m| Duration::from_secs(m * 60));
+    if let Err(e) = saving(&state.app, move |app| app.enable(&id, duration)).await {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, tr!("Route non activée : {e}", "Route not enabled: {e}"));
     }
     Json(route_view(&state.app, route)).into_response()
 }
 
-const NOT_SAVED: &str = "Désactivée, mais l’état n’a pas pu être enregistré : elle serait réactivée au prochain démarrage.";
+fn not_saved(e: &str) -> String {
+    tr!(
+        "Désactivée, mais l’état n’a pas pu être enregistré : elle serait réactivée au prochain démarrage. ({e})",
+        "Disabled, but the state could not be saved: it would be enabled again at the next start. ({e})"
+    )
+}
 
 async fn disable_route(State(state): State<Arc<AdminState>>, Path(path): Path<(String, String)>) -> Response {
     let route = match find_route(&state, &path) {
         Ok(route) => route,
         Err(response) => return response,
     };
-    if let Err(e) = state.app.disable(&route.id()) {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{NOT_SAVED} ({e})"));
+    let id = route.id();
+    if let Err(e) = saving(&state.app, move |app| app.disable(&id)).await {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, not_saved(&e));
     }
     Json(route_view(&state.app, route)).into_response()
 }
 
 async fn disable_all(State(state): State<Arc<AdminState>>) -> Response {
-    match state.app.disable_all() {
+    match saving(&state.app, |app| app.disable_all()).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("{NOT_SAVED} ({e})")),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, not_saved(&e)),
     }
 }
 
@@ -385,7 +423,7 @@ async fn reload_vault(State(state): State<Arc<AdminState>>) -> Response {
     let app = state.app.clone();
     match tokio::task::spawn_blocking(move || app.reload_vault()).await {
         Ok(Ok(reloaded)) => Json(json!({ "reloaded": reloaded })).into_response(),
-        Ok(Err(e)) => error(StatusCode::SERVICE_UNAVAILABLE, format!("Coffre toujours illisible : {e}")),
+        Ok(Err(e)) => error(StatusCode::SERVICE_UNAVAILABLE, tr!("Coffre toujours illisible : {e}", "Vault still unreadable: {e}")),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -397,7 +435,7 @@ async fn static_asset(uri: Uri) -> Response {
         Some(file) => (file, path),
         None => match Assets::get("_shell.html") {
             Some(file) => (file, "_shell.html"),
-            None => return error(StatusCode::NOT_FOUND, "Interface web non construite. Lance scripts/install.sh."),
+            None => return error(StatusCode::NOT_FOUND, tr!("Interface web non construite. Lance scripts/install.sh.", "Web UI not built. Run scripts/install.sh.")),
         },
     };
     let cache = if path.starts_with("assets/") {
@@ -409,5 +447,5 @@ async fn static_asset(uri: Uri) -> Response {
         .header(header::CONTENT_TYPE, file.metadata.mimetype())
         .header(header::CACHE_CONTROL, cache)
         .body(Body::from(file.data.into_owned()))
-        .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Impossible de construire la réponse."))
+        .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, tr!("Impossible de construire la réponse.", "Cannot build the response.")))
 }

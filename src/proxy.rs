@@ -71,7 +71,7 @@ async fn local_clients_only(req: Request, next: Next) -> Response {
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
     let hostname = host.rsplit_once(':').map_or(host, |(name, _)| name);
     if !matches!(hostname, "127.0.0.1" | "localhost") {
-        let message = "En-tête Host inattendu : le proxy ne répond qu’à 127.0.0.1 et localhost.";
+        let message = "Unexpected Host header: the proxy only answers on 127.0.0.1 and localhost.";
         return (StatusCode::FORBIDDEN, Json(json!({ "error": message }))).into_response();
     }
     let from_page = headers.contains_key(header::ORIGIN)
@@ -79,7 +79,7 @@ async fn local_clients_only(req: Request, next: Next) -> Response {
             .get("sec-fetch-site")
             .is_some_and(|site| site.as_bytes() != b"none");
     if from_page {
-        let message = "Requête envoyée par une page web refusée : le proxy ne sert que les programmes locaux.";
+        let message = "Request sent by a web page refused: the proxy only serves local programs.";
         return (StatusCode::FORBIDDEN, Json(json!({ "error": message }))).into_response();
     }
     next.run(req).await
@@ -89,7 +89,7 @@ pub async fn serve(listener: TcpListener, state: Arc<AppState>) -> std::io::Resu
     axum::serve(listener, router(state)).await
 }
 
-const USAGE: &str = "Appelle /<groupe>/<route>/<chemin> ; le proxy ajoute le token. Le groupe dit à qui appartient le compte (perso, un client…) : si l’utilisateur ne précise pas de groupe, utilise perso ; n’utilise un autre groupe que s’il le nomme. Une route désactivée doit être activée par l’utilisateur.";
+const USAGE: &str = "Call /<group>/<route>/<path>; the proxy adds the token. The group says whose account it is (perso, a client…): when the user names no group, use perso; use another group only when the user names it. A disabled route must be enabled by the user.";
 
 /// `GET /`: lets the AI discover which routes exist and which are enabled.
 async fn list_routes(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -110,7 +110,7 @@ async fn list_group(State(state): State<Arc<AppState>>, Path(group): Path<String
         .filter(|r| r.group == group)
         .collect();
     if routes.is_empty() {
-        let message = format!("Groupe « {group} » inconnu. GET / liste les groupes et leurs routes.");
+        let message = format!("Unknown group “{group}”. GET / lists the groups and their routes.");
         return (StatusCode::NOT_FOUND, Json(json!({ "error": message }))).into_response();
     }
     Json(json!({
@@ -176,14 +176,14 @@ async fn forward(State(state): State<Arc<AppState>>, req: Request) -> Response {
         return reject(
             StatusCode::NOT_FOUND,
             format!(
-                "Route « {route_id} » inconnue. Les URL ont la forme /<groupe>/<route>/<chemin> ; GET / liste les routes disponibles."
+                "Unknown route “{route_id}”. URLs look like /<group>/<route>/<path>; GET / lists the available routes."
             ),
         );
     };
     if state.activation(route_id) == Activation::Disabled {
         return reject(
             StatusCode::FORBIDDEN,
-            format!("La route « {route_id} » est désactivée. Demande à l’utilisateur de l’activer dans Token Proxy."),
+            format!("The route “{route_id}” is disabled. Ask the user to enable it in Token Proxy."),
         );
     }
     let url = match upstream_url(&route.upstream, rest, query.as_deref(), &route.auth, &route.token) {
@@ -202,7 +202,7 @@ async fn forward(State(state): State<Arc<AppState>>, req: Request) -> Response {
         AuthInjection::Header { name } => {
             // Validated when the route was saved.
             let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-                return reject(StatusCode::INTERNAL_SERVER_ERROR, "Nom d’en-tête invalide dans la route.".into());
+                return reject(StatusCode::INTERNAL_SERVER_ERROR, "Invalid header name in the route.".into());
             };
             headers.insert(name, secret_header(&route.token));
         }
@@ -211,7 +211,7 @@ async fn forward(State(state): State<Arc<AppState>>, req: Request) -> Response {
 
     let body = match axum::body::to_bytes(req.into_body(), MAX_REQUEST_BODY).await {
         Ok(body) => body,
-        Err(_) => return reject(StatusCode::PAYLOAD_TOO_LARGE, "Corps de requête trop volumineux.".into()),
+        Err(_) => return reject(StatusCode::PAYLOAD_TOO_LARGE, "Request body too large.".into()),
     };
 
     let upstream = state
@@ -226,7 +226,7 @@ async fn forward(State(state): State<Arc<AppState>>, req: Request) -> Response {
         Err(e) => {
             // reqwest errors may contain the URL, and so a query-string token.
             let e = e.without_url();
-            return reject(StatusCode::BAD_GATEWAY, format!("Échec de la requête vers le service : {e}"));
+            return reject(StatusCode::BAD_GATEWAY, format!("Request to the service failed: {e}"));
         }
     };
 
@@ -270,18 +270,18 @@ fn upstream_url(
     auth: &AuthInjection,
     token: &str,
 ) -> Result<reqwest::Url, String> {
-    let base = reqwest::Url::parse(upstream).map_err(|e| format!("URL cible invalide : {e}"))?;
+    let base = reqwest::Url::parse(upstream).map_err(|e| format!("Invalid service URL: {e}"))?;
     let mut url = reqwest::Url::parse(&format!("{}{}", upstream.trim_end_matches('/'), rest))
-        .map_err(|e| format!("Chemin invalide : {e}"))?;
+        .map_err(|e| format!("Invalid path: {e}"))?;
     if url.host() != base.host() || url.port_or_known_default() != base.port_or_known_default() {
-        return Err("Le chemin sortirait de l’hôte cible.".into());
+        return Err("The path would leave the service host.".into());
     }
     // `..` and `%2e%2e` are resolved while parsing: they must not climb above
     // the route's base path. Not a real boundary (the service may decode
     // paths its own way), only a guard against the obvious escape.
     let base_path = base.path().trim_end_matches('/');
     if url.path() != base_path && !url.path().starts_with(&format!("{base_path}/")) {
-        return Err("Le chemin sortirait du chemin de base de la route.".into());
+        return Err("The path would leave the route’s base path.".into());
     }
     url.set_query(query);
     if let AuthInjection::Query { param } = auth {

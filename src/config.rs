@@ -92,40 +92,44 @@ impl fmt::Debug for RouteConfig {
 /// `editing` is the id of the route being replaced, if any.
 pub fn validate_route(route: &RouteConfig, existing: &[RouteConfig], editing: Option<&str>) -> Result<(), String> {
     if !is_slug(&route.name) {
-        return Err("Le nom ne peut contenir que a-z, 0-9, « - » et « _ ».".into());
+        return Err(tr!("Le nom ne peut contenir que a-z, 0-9, « - » et « _ ».", "The name may only contain a-z, 0-9, “-” and “_”."));
     }
     if !is_slug(&route.group) {
-        return Err("Le groupe ne peut contenir que a-z, 0-9, « - » et « _ ».".into());
+        return Err(tr!("Le groupe ne peut contenir que a-z, 0-9, « - » et « _ ».", "The group may only contain a-z, 0-9, “-” and “_”."));
     }
     let id = route.id();
     if existing.iter().any(|r| r.id() == id && Some(r.id().as_str()) != editing) {
-        return Err(format!("Une route « {} » existe déjà dans le groupe « {} ».", route.name, route.group));
+        let (name, group) = (&route.name, &route.group);
+        return Err(tr!(
+            "Une route « {name} » existe déjà dans le groupe « {group} ».",
+            "A route “{name}” already exists in the group “{group}”."
+        ));
     }
-    let url = reqwest::Url::parse(&route.upstream).map_err(|e| format!("URL cible invalide : {e}"))?;
+    let url = reqwest::Url::parse(&route.upstream).map_err(|e| tr!("URL cible invalide : {e}", "Invalid service URL: {e}"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err("L’URL cible doit être de la forme http(s)://hôte[…].".into());
+        return Err(tr!("L’URL cible doit être de la forme http(s)://hôte[…].", "The service URL must look like http(s)://host[…]."));
     }
     if url.scheme() == "http" && !is_local_host(&url) {
-        return Err(
-            "http:// n’est accepté que vers une adresse locale (localhost, réseau privé) : ailleurs, le token passerait en clair. Utilise https://."
-                .into(),
-        );
+        return Err(tr!(
+            "http:// n’est accepté que vers une adresse locale (localhost, réseau privé) : ailleurs, le token passerait en clair. Utilise https://.",
+            "http:// is only accepted for a local address (localhost, private network): elsewhere the token would travel in clear. Use https://."
+        ));
     }
     if url.query().is_some() || !url.username().is_empty() || url.password().is_some() {
-        return Err("L’URL cible ne doit contenir ni paramètres ni identifiants.".into());
+        return Err(tr!("L’URL cible ne doit contenir ni paramètres ni identifiants.", "The service URL must contain neither parameters nor credentials."));
     }
     if route.token.is_empty() {
-        return Err("Le token est vide.".into());
+        return Err(tr!("Le token est vide.", "The token is empty."));
     }
     if route.token.contains(['\r', '\n']) {
-        return Err("Le token doit tenir sur une seule ligne.".into());
+        return Err(tr!("Le token doit tenir sur une seule ligne.", "The token must fit on one line."));
     }
     match &route.auth {
         AuthInjection::Header { name } if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() => {
-            return Err("Nom d’en-tête invalide.".into());
+            return Err(tr!("Nom d’en-tête invalide.", "Invalid header name."));
         }
         AuthInjection::Query { param } if param.is_empty() => {
-            return Err("Le nom du paramètre est vide.".into());
+            return Err(tr!("Le nom du paramètre est vide.", "The parameter name is empty."));
         }
         _ => {}
     }

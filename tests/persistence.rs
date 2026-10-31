@@ -158,3 +158,77 @@ fn routes_saved_before_groups_move_to_perso() {
     let restarted = restart(&store);
     assert_eq!(restarted.activation("perso/coolify-perso"), Activation::Enabled { until: None });
 }
+
+/// Every save waits while the test holds `hold`, like a Keychain prompt.
+#[derive(Default)]
+struct SlowStore {
+    data: MemoryStore,
+    hold: std::sync::Mutex<()>,
+}
+
+impl SecretStore for SlowStore {
+    fn load(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        self.data.load()
+    }
+    fn save(&self, data: &[u8]) -> anyhow::Result<()> {
+        drop(self.hold.lock().unwrap());
+        self.data.save(data)
+    }
+}
+
+/// Reads an activation from another thread, failing instead of hanging if
+/// it has to wait.
+fn activation_now(state: &Arc<AppState>, id: &'static str) -> Activation {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let state = state.clone();
+    std::thread::spawn(move || tx.send(state.activation(id)));
+    rx.recv_timeout(Duration::from_secs(1)).expect("reading the state waited for the save")
+}
+
+#[test]
+fn a_pending_save_blocks_neither_requests_nor_disabling() {
+    let store = Arc::new(SlowStore::default());
+    let state = Arc::new(AppState::new(Box::new(store.clone()), None));
+    for name in ["a", "b"] {
+        state.upsert_route(route(name), None).unwrap();
+    }
+    state.enable("perso/a", None).unwrap();
+
+    let held = store.hold.lock().unwrap();
+    let enabling = std::thread::spawn({
+        let state = state.clone();
+        move || state.enable("perso/b", None)
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    // Requests still read the state while the save waits.
+    assert_eq!(activation_now(&state, "perso/a"), Activation::Enabled { until: None });
+
+    let disabling = std::thread::spawn({
+        let state = state.clone();
+        move || state.disable_all()
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    // Disabling applies at once, before its own save.
+    assert_eq!(state.activation("perso/a"), Activation::Disabled);
+
+    drop(held);
+    assert!(enabling.join().unwrap().is_err(), "an activation saved during a disable must not apply");
+    disabling.join().unwrap().unwrap();
+
+    // Same while a route is being edited.
+    state.enable("perso/a", None).unwrap();
+    let held = store.hold.lock().unwrap();
+    let editing = std::thread::spawn({
+        let state = state.clone();
+        move || state.upsert_route(route("b"), Some("perso/b"))
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(activation_now(&state, "perso/a"), Activation::Enabled { until: None });
+    drop(held);
+    editing.join().unwrap().unwrap();
+    assert_eq!(state.activation("perso/b"), Activation::Disabled);
+
+    let restarted = AppState::new(Box::new(store.clone()), None);
+    assert_eq!(restarted.activation("perso/a"), Activation::Enabled { until: None });
+    assert_eq!(restarted.activation("perso/b"), Activation::Disabled);
+}

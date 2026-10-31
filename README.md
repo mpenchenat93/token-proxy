@@ -15,7 +15,7 @@ agent ──► http://127.0.0.1:8787/acme/coolify/api/v1/applications
   <img alt="Token Proxy admin UI: routes grouped by owner, their state and the latest requests" src="docs/screenshots/dashboard-light.png">
 </picture>
 
-> The admin UI is in English and French: it follows your browser language and has a switcher. Messages from the server (API errors, Touch ID prompts, audit notes) are in French. The screenshots show demo data.
+> The admin UI is in English and French: it follows your browser language and has a switcher. Admin API errors and Touch ID prompts follow the macOS language (French, or English otherwise; `TOKEN_PROXY_LANG=en` or `fr` overrides it). What the agent reads on the proxy port is always in English. The screenshots show demo data.
 
 ## Why
 
@@ -37,11 +37,11 @@ Token Proxy keeps the tokens in the macOS Keychain and adds them to requests its
 - **Touch ID for anything that grants access.** Adding, editing, deleting or enabling a route opens the macOS authentication dialog (Touch ID or the account password). The admin API is reachable by any local program, the agent included, but no program can complete that dialog. An agent may *ask* for a route to be enabled: approve only what you triggered yourself. Disabling never needs Touch ID.
 - **Moving a token needs the token.** Editing a route keeps its token only while the token goes to the same place: changing the service's scheme, host or port, or how the token is sent (header, query parameter), is refused unless the token is pasted again. An agent that calls the admin API never has the token, so it cannot point a route elsewhere, even if you approve the dialog by mistake. The dialog shows each change as before → after.
 - **https outside your network.** `http://` service URLs are refused except for local addresses (`localhost`, private and link-local IPs, `.local`), so a token never crosses the internet in clear.
-- **Tokens stay in the Keychain.** All routes, tokens included, are stored in one Keychain item (`token-proxy` / `vault`). No file holds a secret, the APIs never return a token, and macOS asks you before any other program reads or changes that item.
+- **Tokens stay in the Keychain.** All routes, tokens included, are stored in one Keychain item (`token-proxy` / `vault`). No file holds a secret, the APIs never return a token, and macOS asks you before any other program reads or changes that item. That prompt is the last barrier against an agent with a shell, which could rebuild or replace `~/.local/bin/token-proxy` and restart it: **a Keychain prompt you did not trigger yourself (by running `install.sh`) must be denied.**
 - **Routes start disabled.** You enable a route for 15 minutes, 1 hour, 4 hours or until you disable it. Activations are stored in the Keychain too, so they survive a restart and no program can enable a route by editing a file. Editing a route disables it.
 - **The token only goes to its service.** Credentials sent by the client (`Authorization`, `Cookie`, `x-api-key`) are dropped, redirects are not followed, and response headers that contain the token are removed.
 - **Loopback only, local programs only.** Both ports listen on `127.0.0.1` only. Requests with an unexpected `Host` header are refused (DNS rebinding). On the proxy port, requests sent by a web page are refused (`Origin` or `Sec-Fetch-Site` headers), and CORS headers from services are removed, so a website open in your browser cannot use an enabled route. On the admin port, state-changing requests from another web origin are refused (CSRF).
-- **Audit log.** Every request is written to `~/Library/Logs/token-proxy/audit.log` (route, method, path, status; never a token or a body), kept for 30 days. The UI shows the last 200 requests since the service started.
+- **Audit log.** Every request is written to `~/Library/Logs/token-proxy/audit.log` (route, method, path, status; never a token or a body), kept for 30 days. The UI shows the last 200 requests since the service started. It is a record, not proof: any program running as you can edit or delete the file.
 
 ## Limitations
 
@@ -54,9 +54,9 @@ Know them before you rely on it:
 - **Responses reach the agent.** Whatever the service answers goes to the agent and its provider. Only response headers are checked for the token, not bodies.
 - **Query-parameter tokens can end up in upstream logs**, as with any URL token. Prefer header-based auth when the service supports it.
 - **Not for shared machines or servers.** It is built for one person on one Mac.
-- **Touch ID is only as good as your attention.** The dialog says what is being approved (for instance "activer la route « acme/coolify » …"): read it.
+- **Touch ID is only as good as your attention.** The dialog says what is being approved (for instance "enable the route “acme/coolify” (https://coolify.acme.example) for 15 min"): read it. Only one dialog is shown at a time, so an agent can keep it busy and delay your own approvals; it can never delay disabling, which needs none. Cancel a dialog you did not trigger.
 - **No WebSockets**, request bodies up to 10 MB. Streamed responses (server-sent events) work.
-- **Unsigned binary.** macOS asks again for Keychain access after every reinstall.
+- **Unsigned binary.** macOS asks again for Keychain access after every reinstall, which is why a prompt you did not trigger must be denied.
 - **Personal project, not audited.** Read the code (about 1,500 lines of Rust) before trusting it with production tokens.
 
 ## Install

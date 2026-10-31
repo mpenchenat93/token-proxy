@@ -9,7 +9,7 @@ use std::time::Duration;
 
 pub trait Approver: Send + Sync {
     /// Blocks until the user approves or refuses. `reason` completes the
-    /// system sentence "token-proxy tente de …" (the reason is in French).
+    /// system sentence "token-proxy is trying to …", in the macOS language.
     fn approve(&self, reason: &str) -> Result<(), String>;
 }
 
@@ -31,7 +31,7 @@ impl Approver for LocalAuthentication {
             let outcome = if success.as_bool() {
                 Ok(())
             } else if error.is_null() {
-                Err("échec de l’authentification".to_string())
+                Err(tr!("échec de l’authentification", "authentication failed"))
             } else {
                 // SAFETY: a non-null error pointer passed to the reply block is a valid NSError.
                 Err(unsafe { &*error }.localizedDescription().to_string())
@@ -50,7 +50,7 @@ impl Approver for LocalAuthentication {
             );
             let outcome = rx
                 .recv_timeout(APPROVAL_TIMEOUT)
-                .unwrap_or_else(|_| Err("pas de réponse à temps".to_string()));
+                .unwrap_or_else(|_| Err(tr!("pas de réponse à temps", "no answer in time")));
             context.invalidate();
             outcome
         }
@@ -62,6 +62,6 @@ pub struct FixedApprover(pub bool);
 
 impl Approver for FixedApprover {
     fn approve(&self, _reason: &str) -> Result<(), String> {
-        if self.0 { Ok(()) } else { Err("refusé".to_string()) }
+        if self.0 { Ok(()) } else { Err("refused".to_string()) }
     }
 }

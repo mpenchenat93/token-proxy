@@ -32,7 +32,7 @@ pub fn load(store: &dyn SecretStore) -> Result<VaultData> {
         None => Ok(VaultData::default()),
         Some(bytes) => serde_json::from_slice(&bytes)
             .map(migrate)
-            .context("le contenu du coffre n’est pas du JSON valide"),
+            .with_context(|| tr!("le contenu du coffre n’est pas du JSON valide", "the vault content is not valid JSON")),
     }
 }
 
@@ -93,13 +93,13 @@ impl SecretStore for KeychainStore {
         match security_framework::passwords::get_generic_password(SERVICE, ACCOUNT) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("lecture du Trousseau impossible : {e}")),
+            Err(e) => Err(anyhow::anyhow!(tr!("lecture du Trousseau impossible : {e}", "cannot read the Keychain: {e}"))),
         }
     }
 
     fn save(&self, data: &[u8]) -> Result<()> {
         security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, data)
-            .map_err(|e| anyhow::anyhow!("écriture dans le Trousseau impossible : {e}"))
+            .map_err(|e| anyhow::anyhow!(tr!("écriture dans le Trousseau impossible : {e}", "cannot write to the Keychain: {e}")))
     }
 }
 

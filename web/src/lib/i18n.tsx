@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useState } from 'react'
 
 // UI translations. Messages coming from the server (API errors, Touch ID
-// reasons, audit notes) are not translated: they stay in French.
+// reasons) are not translated here: the server writes them in the macOS
+// language.
 
 export type Locale = 'fr' | 'en'
 

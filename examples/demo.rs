@@ -60,7 +60,7 @@ fn seed(state: &AppState) {
     let now = Local::now();
     let entries = [
         (41, "perso/github", "GET", "/repos/octo/app/issues", 200, true, "214 ms"),
-        (33, "acme/directus", "GET", "/items/articles", 403, false, "La route « acme/directus » est désactivée. Demande à l’utilisateur de l’activer dans Token Proxy."),
+        (33, "acme/directus", "GET", "/items/articles", 403, false, "The route “acme/directus” is disabled. Ask the user to enable it in Token Proxy."),
         (26, "perso/openai", "POST", "/v1/chat/completions", 200, true, "1874 ms"),
         (18, "acme/coolify", "GET", "/api/v1/applications", 200, true, "302 ms"),
         (9, "acme/coolify", "POST", "/api/v1/deploy", 201, true, "655 ms"),
